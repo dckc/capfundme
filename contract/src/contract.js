@@ -1,5 +1,9 @@
 // @ts-check
 import '@agoric/zoe/exported';
+// import { assert, details as X, q } from '@agoric/assert';
+import { Far } from '@agoric/marshal';
+import makeStore from '@agoric/store';
+// import { assertProposalShape } from '@agoric/zoe/contractSupport';
 
 /**
  * This is a very simple contract that creates a new issuer and mints payments
@@ -17,37 +21,68 @@ import '@agoric/zoe/exported';
  * @type {ContractStartFn}
  */
 const start = async (zcf) => {
+  // ISSUE: duplicate names
+  /** @type {{ decimalPlaces: number, memberNames: string[], quorum: number }} */
+  const { decimalPlaces, memberNames, quorum } = zcf.getTerms();
+  // TODO: validate terms
+
   // Create the internal token mint for a fungible digital asset. Note
   // that 'Tokens' is both the keyword and the allegedName.
-  const zcfMint = await zcf.makeZCFMint('Tokens');
+  const zcfMint = await zcf.makeZCFMint(
+    'Token',
+    undefined,
+    harden({ decimalPlaces }),
+  );
   // AWAIT
 
   // Now that ZCF has saved the issuer, brand, and local amountMath, they
   // can be accessed synchronously.
-  const { amountMath, issuer } = zcfMint.getIssuerRecord();
+  const { issuer } = zcfMint.getIssuerRecord();
 
-  const mintPayment = (seat) => {
-    const amount = amountMath.make(1000);
-    // Synchronously mint and allocate amount to seat.
-    zcfMint.mintGains({ Token: amount }, seat);
-    // Exit the seat so that the user gets a payout.
-    seat.exit();
-    // Since the user is getting the payout through Zoe, we can
-    // return anything here. Let's return some helpful instructions.
-    return 'Offer completed. You should receive a payment from Zoe';
+  let nextItem = 0;
+  // TODO: rejecting proposals
+  /** @type { Store<number, { beneficiary: ZCFSeat, supporters: Map<ZCFSeat, string>}> } */
+  const proposals = makeStore('proposal');
+
+  /** @type { OfferHandler } */
+  const applicationHander = (beneficiary) => {
+    nextItem += 1;
+    proposals.init(nextItem, { beneficiary, supporters: new Map() });
+    return nextItem;
   };
+
+  const makeMembershipInvitation = (name) => {
+    /** @type { OfferHandler} */
+    const handler = (seat) =>
+      Far('member', {
+        /** @param {number} item */
+        support(item) {
+          const { beneficiary, supporters } = proposals.get(item);
+          supporters.set(seat, name);
+          console.log('@@supporters', [...supporters.values()]);
+          proposals.set(item, { beneficiary, supporters });
+          if (supporters.size >= quorum) {
+            const proposal = beneficiary.getProposal();
+            console.log('@@@minting', proposal.want);
+            zcfMint.mintGains(proposal.want, beneficiary);
+            beneficiary.exit();
+          }
+        },
+      });
+    return zcf.makeInvitation(handler, '@@WG name', { name });
+  };
+  const membership = Object.fromEntries(
+    memberNames.map((name) => [name, makeMembershipInvitation(name)]),
+  );
 
   const creatorFacet = {
-    // The creator of the instance can send invitations to anyone
-    // they wish to.
-    makeInvitation: () => zcf.makeInvitation(mintPayment, 'mint a payment'),
+    getMembership: () => membership,
     getTokenIssuer: () => issuer,
   };
-
   const publicFacet = {
-    // Make the token issuer public. Note that only the mint can
-    // make new digital assets. The issuer is ok to make public.
     getTokenIssuer: () => issuer,
+    applyForFunding: () =>
+      zcf.makeInvitation(applicationHander, 'application for funding'),
   };
 
   // Return the creatorFacet to the creator, so they can make
